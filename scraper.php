@@ -1,118 +1,92 @@
 <?php
-# Port Macquarie Hasting Council scraper
+### Port Macquarie Hastings Council scraper
+
 require 'scraperwiki.php';
 require 'simple_html_dom.php';
+
 date_default_timezone_set('Australia/Sydney');
 
-
-## Get Cookies
-function get_cookies($terms_url) {
-    $curl = curl_init($terms_url);
-    curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($curl, CURLOPT_HEADER, TRUE);
-    $terms_response = curl_exec($curl);
-    curl_close($curl);
-
-    preg_match_all('/^Set-Cookie:\s*([^;]*)/mi', $terms_response, $matches);
-    $cookies = array();
-    foreach($matches[1] as $item) {
-        parse_str($item, $cookie);
-        $cookies = array_merge($cookies, $cookie);
-    }
-    return $cookies;
+// Default to 'thisweek', use MORPH_PERIOD to change to 'thismonth' or 'lastmonth' for data recovery
+switch(getenv('MORPH_PERIOD')) {
+    case 'thismonth' :
+        $datefrom = date('01/m/Y');         // hard-coded '01' for first day
+        $dateto   = date('t/m/Y');
+        break;
+    case 'lastmonth' :
+        $datefrom = date('d/m/Y', strtotime('first day of previous month'));
+        $dateto   = date('d/m/Y', strtotime('last day of previous month'));
+        break;
+    case 'thisweek' :
+    default         :
+        $datefrom = date('d/m/Y', strtotime('-1 week'));
+        $dateto   = date('d/m/Y');
+        break;
 }
+print "Getting data between " .$datefrom. " and " .$dateto. ", changable via MORPH_PERIOD environment\n";
 
 
-###
-### Main code start here
-###
-$url_base = "https://eservice.hastings.nsw.gov.au";
-$term_url = "https://eservice.hastings.nsw.gov.au/eservice/dialog/daEnquiryInit.do?doc_typ=(10,15)&nodeNum=115765";
+// setup all the know kind of fixed stuff
+$junktoServer = 'draw=1&columns%5B0%5D%5Bdata%5D=0&columns%5B0%5D%5Bname%5D=&columns%5B0%5D%5Bsearchable%5D=true&columns%5B0%5D%5Borderable%5D=false&columns%5B0%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B0%5D%5Bsearch%5D%5Bregex%5D=false&columns%5B1%5D%5Bdata%5D=1&columns%5B1%5D%5Bname%5D=&columns%5B1%5D%5Bsearchable%5D=true&columns%5B1%5D%5Borderable%5D=false&columns%5B1%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B1%5D%5Bsearch%5D%5Bregex%5D=false&columns%5B2%5D%5Bdata%5D=2&columns%5B2%5D%5Bname%5D=&columns%5B2%5D%5Bsearchable%5D=true&columns%5B2%5D%5Borderable%5D=false&columns%5B2%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B2%5D%5Bsearch%5D%5Bregex%5D=false&columns%5B3%5D%5Bdata%5D=3&columns%5B3%5D%5Bname%5D=&columns%5B3%5D%5Bsearchable%5D=true&columns%5B3%5D%5Borderable%5D=false&columns%5B3%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B3%5D%5Bsearch%5D%5Bregex%5D=false&columns%5B4%5D%5Bdata%5D=4&columns%5B4%5D%5Bname%5D=&columns%5B4%5D%5Bsearchable%5D=true&columns%5B4%5D%5Borderable%5D=false&columns%5B4%5D%5Bsearch%5D%5Bvalue%5D=&columns%5B4%5D%5Bsearch%5D%5Bregex%5D=false&start=0&length=100&search%5Bvalue%5D=&search%5Bregex%5D=false&json=';
+$jsontoServer = '{"ApplicationNumber":null,"ApplicationYear":null,"DateFrom":"1/06/2016","DateTo":"30/06/2016","DateType":"1","RemoveUndeterminedApplications":false,"ApplicationDescription":null,"ApplicationType":null,"UnitNumberFrom":null,"UnitNumberTo":null,"StreetNumberFrom":null,"StreetNumberTo":null,"StreetName":null,"SuburbName":null,"PostCode":null,"PropertyName":null,"LotNumber":null,"PlanNumber":null,"ShowOutstandingApplications":false,"ShowExhibitedApplications":false,"PropertyKeys":null,"PrecinctValue":null,"IncludeDocuments":false}';
 
-    # Default to 'thisweek', use MORPH_PERIOD to change to 'thismonth' or 'lastmonth' for data recovery
-    switch(getenv('MORPH_PERIOD')) {
-        case 'thismonth' :
-            $period = 'thismonth';
-            // Current timestamp is assumed, so these find first and last day of THIS month
-            $start_date = date('01/m/Y'); // hard-coded '01' for first day
-            $end_date   = date('t/m/Y');
-            break;
-        case 'lastmonth' :
-            $start_date = date("01/m/Y", strtotime("first day of previous month"));
-            $end_date   = date("t/m/Y", strtotime("last day of previous month"));
-            break;
-        default         :
-            $start_date = date('d/m/Y', time()-7*24*60*60);
-            $end_date   = date('d/m/Y');
-            break;
-    }
-    $period = '&dateFrom=' .urlencode($start_date). '&dateTo=' .urlencode($end_date);
+$url_base = "https://datracker.pmhc.nsw.gov.au/Application/GetApplications";
+$infourl_base = "https://datracker.pmhc.nsw.gov.au/Application/ApplicationDetails/";
+$comment_base = "mailto:council@pmhc.nsw.gov.au";
 
+// set the date from and date to field
+$json = json_decode($jsontoServer);
+$json->DateFrom = $datefrom;
+$json->DateTo   = $dateto;
+$json = json_encode($json, JSON_UNESCAPED_SLASHES);
 
-$da_page = $url_base . "/eservice/dialog/daEnquiry.do?lodgeRangeType=on" .$period. "&searchMode=A&submitButton=Search";
-$cookies = get_cookies($term_url);
+// Create a stream
+$opts = array(
+  'http'=>array(
+    'method'  => "POST",
+    'header'  => "Accept: application/json\r\n" .
+                 "Content-Type: application/x-www-form-urlencoded; charset=UTF-8\r\n" .
+                 "Cookie: User=accessAllowed-MasterView=True\r\n",
+    'content' => $junktoServer . urlencode($json),
+    'timeout' => 300,
+  )
+);
+$context = stream_context_create($opts);
 
-# Manually set cookie's key and ready for future use
-$request = array(
-    'http'    => array(
-    'header'  => "Cookie: JSESSIONID_live=" .$cookies['JSESSIONID_live']. "; path=/\r\n"
-    ));
-$context = stream_context_create($request);
+// Open the file using the HTTP headers set above and deal with the stuff received
+$file  = file_get_contents($url_base, false, $context);
+$decodedStuff = json_decode($file);
 
-# Get the data that I want within the page
-$dom = file_get_html($da_page, false, $context);
+    // The usual, look for the data set and if needed, save it
+    foreach ($decodedStuff->data as $record) {
+        // Slow way to transform the date but it works
+        $date_received = explode('/', $record[3]);
+        $date_received = "$date_received[2]-$date_received[1]-$date_received[0]";
 
-# Data from the main page just too hard to work with, 
-# Get the indivual DA page and work from there
-foreach($dom->find("a[class=plain_header]") as $ref_link ) {
-    $actual_da_page = $url_base . $ref_link->href;
-    $actual_da_page_dom = file_get_html($actual_da_page, false, $context);
+        // Get the address and description
+        $tokens = explode(" <br/>", $record[4]);
+        $address = $tokens[0];
+        $description = str_ireplace(['<b>', '</b>'], '', end($tokens));
 
-    $application = array('council_reference' => '', 'address' => '', 'description' => '', 'info_url' => '', 
-                         'comment_url' => '', 'date_scraped' => '', 'date_received' => '');
-    $key = '';
-    foreach($actual_da_page_dom->find('p[class=rowDataOnly]') as $gem) {
-        if (!is_null($gem->find("span[class=key]", 0))) {
-            $key = trim($gem->find("span[class=key]", 0)->plaintext);
-        }
-        if (!is_null($gem->find("span[class=inputField]", 0))) {
-            $value = preg_replace('/\s+/', ' ', trim($gem->find("span[class=inputField]", 0)->plaintext));
-        }
+        // Put all information in an array
+        $application = array (
+            'council_reference' => $record[1],
+            'address'           => $address,
+            'description'       => $description,
+            'info_url'          => $infourl_base . $record[0],
+            'comment_url'       => $comment_base,
+            'date_scraped'      => date('Y-m-d'),
+            'date_received'     => date('Y-m-d', strtotime($date_received))
+        );
 
-        switch ($key) {
-            case 'Application No.' :
-                $application['council_reference'] = $value;
-                break;            
-            case 'Property Details' :
-                $application['address'] = $value . ", Australia";
-                break;
-            case 'Type of Work' :
-                $application['description'] = $value;
-                break;
-            case 'Date Lodged' :
-                $date_received = explode('/', $value);
-                $date_received = "$date_received[2]-$date_received[1]-$date_received[0]";    
-                $date_received = date('Y-m-d', strtotime($date_received));             
-                $application['date_received'] = $date_received;
-                break;                
+        // Check if record exist, if not, INSERT, else do nothing
+        $existingRecords = scraperwiki::select("* from data where `council_reference`='" . $application['council_reference'] . "'");
+        if (count($existingRecords) == 0) {
+            print ("Saving record " . $application['council_reference'] . ' - ' . $address . "\n");
+            // print_r ($application);
+            scraperwiki::save(array('council_reference'), $application);
+        } else {
+            print ("Skipping already saved record " . $application['council_reference'] . "\n");
         }
     }
-    $application['info_url'] = $term_url;
-    $application['comment_url'] = $term_url;
-    $application['date_scraped'] = date('Y-m-d');
-
-    # Check if record exist, if not, INSERT, else do nothing
-    $existingRecords = scraperwiki::select("* from data where `council_reference`='" . $application['council_reference'] . "'");
-    if ((count($existingRecords) == 0) && ($application['council_reference'] !== 'Not on file')) {
-        print ("Saving record " . $application['council_reference'] . "\n");
-        # print_r ($application);
-        scraperwiki::save(array('council_reference'), $application);
-    } else {
-        print ("Skipping already saved record or ignore corrupted data - " . $application['council_reference'] . "\n");
-    }
-
-}
-
 
 ?>
